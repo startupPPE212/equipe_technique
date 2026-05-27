@@ -34,13 +34,10 @@ from fastapi import HTTPException
 import secrets
 import hashlib  
 from .models import User  
-from .migrate import run_migrations
 
 app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
-
-run_migrations(engine)
 
 app.add_middleware(
     SessionMiddleware, 
@@ -464,7 +461,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         <title>Dashboard | 💎SDE ADMIN</title>
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
         <div class="main-content">
             <header class="mb-5">
                 <h1 style="font-size: 38px;">🏪 Vue d'ensemble</h1>
@@ -537,7 +534,7 @@ def page_client(request: Request):
         </style>
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
         <div class="main-content text-center">
             <div class="client-card">
                 <h1 class="mb-4" style="color: #60a5fa;">👤 Nouveau Client</h1>
@@ -873,7 +870,7 @@ def voir_panier(request: Request):
         </style>
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
         <div class="main-content">
             <div class="receipt-container">
                 <h2 class="text-center mb-4" style="color: #60a5fa;">🧾 Récapitulatif</h2>
@@ -1140,7 +1137,7 @@ def vente_impossible(produit: str, demande: int, dispo: int):
         </style>
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
         <div class="main-content">
             <div class="vi-wrapper">
                 <div class="vi-card">
@@ -1471,7 +1468,7 @@ def gestion_stocks(request: Request, db: Session = Depends(get_db)):
         </style>
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
         <div class="main-content">
             <div class="stock-header" style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div>
@@ -1811,7 +1808,7 @@ def page_update(request: Request, db: Session = Depends(get_db)):
         </style>
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
         {toast_html}
         <div class="main-content">
             <div class="update-page-header">
@@ -2467,7 +2464,7 @@ def prediction(request: Request, db: Session = Depends(get_db)):
 
     df = pd.DataFrame(data)
     if df.empty:
-        return f"{sidebar()}<div class='main-content'><h3>Pas assez de données pour l'analyse.</h3></div>"
+        return f"{sidebar(request)}<div class='main-content'><h3>Pas assez de données pour l'analyse.</h3></div>"
 
     X = df[["age", "sexe"]]
     y = df["rayon"]
@@ -2527,7 +2524,7 @@ def prediction(request: Request, db: Session = Depends(get_db)):
         {COMMON_STYLE}
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
 
         <div class="main-content">
             <div class="d-flex justify-content-between align-items-center mb-5">
@@ -2954,7 +2951,7 @@ def voir_historique(request: Request, db: Session = Depends(get_db)):
         </style>
     </head>
     <body>
-        {sidebar()}
+        {sidebar(request)}
         <div class="main-content">
             {main_body}
         </div>
@@ -3084,5 +3081,4 @@ def welcome():
     </body>
     </html>
     """
-
 
