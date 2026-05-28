@@ -33,45 +33,25 @@ from fastapi import Depends
 from fastapi import HTTPException
 import secrets
 import hashlib  
-from .models import User  
+from .models import User
+from .migrate import run_migrations
+from .auth import router as auth_router
+from .client_routes import router as client_router
+from .fournisseur_routes import router as fournisseur_router
 
 app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
+run_migrations(engine)
 
-app.add_middleware(
-    SessionMiddleware, 
-    secret_key="une_cle_secrete_tres_securisee_pour_ta_startup",
-    session_cookie="sde_session",
-    same_site="lax",
-    https_only=False
-)
+app.include_router(auth_router)
+app.include_router(client_router)
+app.include_router(fournisseur_router)
+
 
 SECRET_KEY_FIXE = os.getenv("SECRET_KEY", "ma_cle_secrete_super_longue_et_introuvable_12345")
 
-#------------SECURITE GLOBALE------------------
 
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    path = request.url.path
-
-    # 1. Routes publiques ouvertes à tout le monde
-    PUBLIC_ROUTES = ["/login", "/register", "/static"]
-    if any(path.startswith(r) for r in PUBLIC_ROUTES):
-        return await call_next(request)
-
-    # 2. Récupération de la session
-    session = getattr(request, "session", {})
-    user_id = session.get("user_id")
-    user_role = session.get("user_role")
-
-    # 3. Si l'utilisateur n'est pas connecté, REDIRECTION STRICTE AU LOGIN
-    if not user_id or not user_role:
-        if path != "/login":
-            return RedirectResponse(url="/login", status_code=303)
-
-    return await call_next(request)
-    
 #-------------COULEUR PRINCIPALE-----------------
 
 COMMON_STYLE = """
@@ -174,7 +154,7 @@ def sidebar(request: Request):
         """
     elif user_role == "CLIENT":
         menu_buttons = """
-            <a href="/boutique" class="menu-btn">🛒 Boutique en Ligne</a>
+            <a href="/shop" class="menu-btn">🛒 Boutique en Ligne</a>
             <a href="/commandes/mes-achats" class="menu-btn">📦 Mes Commandes</a>
             <a href="/panier-virtuel" class="menu-btn">🧾 Mon Panier</a>
         """
@@ -202,15 +182,31 @@ def sidebar(request: Request):
         </div>
     </div>
     """
-    
-#------------------------------------------
 
+#-------------SECURITE GLOBALE------------------
+# RÈGLE STARLETTE : dernier add_middleware = outermost = s'exécute EN PREMIER sur chaque requête.
+# SessionMiddleware doit donc être ajouté EN DERNIER pour parser le cookie avant auth_middleware.
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    PUBLIC_ROUTES = ["/login", "/register", "/welcome", "/static",
+                     "/resend-verification", "/verify-email", "/compte-supprime"]
+    if any(path.startswith(r) for r in PUBLIC_ROUTES):
+        return await call_next(request)
+    session = getattr(request, "session", None)
+    if session is None or not session.get("user_id"):
+        return RedirectResponse("/login")
+    return await call_next(request)
+
+# ⚠️  Ajouté APRÈS @app.middleware → devient outermost → parse le cookie en premier ✓
 app.add_middleware(
     SessionMiddleware,
     secret_key=SECRET_KEY_FIXE,
-    max_age=None,              
-    same_site="none",           
-    https_only=True             
+    max_age=86400,
+    same_site="lax",
+    https_only=False,
+    session_cookie="sde_session",
 )
 
 
@@ -221,7 +217,6 @@ def check_admin(request: Request):
         raise HTTPException(status_code=401)
 
 #-----------FONCTIONS PREDICTIONS-----------------
-
 def calcul_prediction(ventes):
 
     def convertir_age(age):
@@ -283,7 +278,9 @@ def get_db():
         yield db  # FastAPI utilisera cet objet 'db' dans tes routes
     finally:
         db.close()
-    
+#----------------- PROFIL CORRESPONDANT----------------
+
+
 # ---------------- PRODUITS COMPLETS ----------------
 ARTICLES = {
 
@@ -394,32 +391,13 @@ def force_init(db: Session = Depends(get_db)):
     # Puis faites db.commit()
     return {"status": "Database populated"}
 
-#----------------- PROFIL CORRESPONDANT----------------
+# ---------------- HOME ----------------
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_db)):
-    user_id = request.session.get("user_id")
-    user_role = request.session.get("user_role")
-
-    # Si pas connecté, retour à la case départ
-    if not user_id:
-        return RedirectResponse(url="/login", status_code=303)
-
-    # Si c'est un compte ENTREPRISE, on charge TOUT ton code d'origine (SDE ADMIN)
-    if user_role == "ENTREPRISE":
-        # --- TON CODE DE VENTES EXISTANT COMMENCE ICI ---
-        ventes = db.query(Vente).all()
-        # ... (tout ton traitement de statistiques, graphiques Plotly et return HTML)
-        
-    # Si c'est un autre profil, on le redirige vers sa page dédiée UNIQUEMENT si elle existe
-    elif user_role == "CLIENT":
-        return RedirectResponse(url="/boutique", status_code=303)
-    elif user_role == "FOURNISSEUR":
-        # En attendant que tu crées la page fournisseur, on lui montre une page temporaire ou le login
-        return HTMLResponse("<h1>📦 Espace Fournisseur (En cours de développement)</h1><a href='/logout'>Se déconnecter</a>")
-    
-    else:
-        return RedirectResponse(url="/login", status_code=303)
+    profil = request.session.get("profil") or request.session.get("user_role", "")
+    if not request.session.get("admin") and profil != "ENTREPRISE":
+        return RedirectResponse("/login")
     
     # --- CALCULS DES DONNÉES ---
     ventes = db.query(Vente).all()
@@ -1199,7 +1177,7 @@ def init_stocks_si_vide(db: Session):
 
 @app.get("/stocks", response_class=HTMLResponse)
 def gestion_stocks(request: Request, db: Session = Depends(get_db)):
-    if not request.session.get("admin"):
+    if not request.session.get("admin") and request.session.get("profil","") != "ENTREPRISE" and request.session.get("user_role","") != "ENTREPRISE":
         return RedirectResponse("/login")
 
     # Initialise les stocks si c'est la première visite
@@ -1526,7 +1504,7 @@ def gestion_stocks(request: Request, db: Session = Depends(get_db)):
 
 @app.post("/stocks/reapprovisionner")
 def reapprovisionner(request: Request, produit_id: int = Form(...), qte_ajout: int = Form(...), db: Session = Depends(get_db)):
-    if not request.session.get("admin"):
+    if not request.session.get("admin") and request.session.get("profil","") != "ENTREPRISE" and request.session.get("user_role","") != "ENTREPRISE":
         return RedirectResponse("/login")
     stock = db.query(Stock).filter(Stock.id == produit_id).first()
     if stock:
@@ -1547,7 +1525,7 @@ def ajouter_produit_stock(
     quantite: int = Form(...),
     db: Session = Depends(get_db)
 ):
-    if not request.session.get("admin"):
+    if not request.session.get("admin") and request.session.get("profil","") != "ENTREPRISE" and request.session.get("user_role","") != "ENTREPRISE":
         return RedirectResponse("/login")
 
     rayon_final = nouveau_rayon.strip().lower() if rayon == "autre" and nouveau_rayon.strip() else rayon
@@ -1574,7 +1552,7 @@ def supprimer_article(
     produit_id: int = Form(...),
     db: Session = Depends(get_db)
 ):
-    if not request.session.get("admin"):
+    if not request.session.get("admin") and request.session.get("profil","") != "ENTREPRISE" and request.session.get("user_role","") != "ENTREPRISE":
         return RedirectResponse("/login")
     stock = db.query(Stock).filter(Stock.id == produit_id).first()
     if stock:
@@ -1591,7 +1569,7 @@ def supprimer_rayon(
     rayon: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    if not request.session.get("admin"):
+    if not request.session.get("admin") and request.session.get("profil","") != "ENTREPRISE" and request.session.get("user_role","") != "ENTREPRISE":
         return RedirectResponse("/login")
     # Supprime TOUS les articles du rayon d'un coup
     db.query(Stock).filter(Stock.rayon == rayon).delete()
@@ -1603,7 +1581,7 @@ def supprimer_rayon(
 
 @app.get("/update", response_class=HTMLResponse)
 def page_update(request: Request, db: Session = Depends(get_db)):
-    if not request.session.get("admin"):
+    if not request.session.get("admin") and request.session.get("profil","") != "ENTREPRISE" and request.session.get("user_role","") != "ENTREPRISE":
         return RedirectResponse("/login")
 
     stocks = db.query(Stock).order_by(Stock.rayon, Stock.produit).all()
@@ -2627,226 +2605,25 @@ def export_csv(db: Session = Depends(get_db)):
 
     return StreamingResponse(output, media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=ventes.csv"})
+
+ #----------------LOGIN--------------------
  
 
 
-# --- PAGE D'INSCRIPTION ---
-@app.get("/register", response_class=HTMLResponse)
-def page_inscription():
-    return f"""
-    <html>
-    <head>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        {COMMON_STYLE}
-        <style>
-            .register-card {{
-                max-width: 550px; margin: 40px auto;
-                background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1);
-                border-radius: 24px; padding: 35px; backdrop-filter: blur(20px);
-            }}
-            input, select {{
-                background: rgba(0,0,0,0.3) !important; border: 1px solid rgba(255,255,255,0.2) !important;
-                color: white !important; border-radius: 10px !important; padding: 10px !important;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="register-card">
-                <h2 class="text-center mb-4">🚀 Créer un Compte Startup</h2>
-                <form action="/register" method="post">
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Nom</label>
-                            <input type="text" name="nom" class="form-control" required>
-                        </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Prénom</label>
-                            <input type="text" name="prenom" class="form-control" required>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Sexe</label>
-                            <select name="sexe" class="form-select" required>
-                                <option value="Homme">Homme</option>
-                                <option value="Femme">Femme</option>
-                            </select>
-                        </div>
-                        <div class="col-md-6 mb-3">
-                            <label class="form-label">Numéro de Téléphone</label>
-                            <input type="text" name="numero" class="form-control" placeholder="Ex: 6xx xxx xxx" required>
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Adresse E-mail</label>
-                        <input type="email" name="email" class="form-control" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Mot de passe</label>
-                        <input type="password" name="password" class="form-control" required>
-                    </div>
-                    <div class="mb-4">
-                        <label class="form-label text-vert-fluo">Quel est votre profil ?</label>
-                        <select name="profil" class="form-select" style="border-color: var(--neon-green) !important;" required>
-                            <option value="CLIENT">🛒 CLIENT (Achats & Commandes en ligne)</option>
-                            <option value="FOURNISSEUR">📦 FOURNISSEUR (Ventes en gros lots aux entreprises)</option>
-                            <option value="ENTREPRISE">🏪 ENTREPRISE (Supermarché, Boutique, Restaurant, Secrétariat...)</option>
-                        </select>
-                    </div>
-                    <button type="submit" class="btn btn-neon w-100">CRÉER MON COMPTE</button>
-                    <p class="text-center mt-3" style="font-size:14px;">Déjà inscrit ? <a href="/login" style="color:var(--neon-blue);">Se connecter</a></p>
-                </form>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+# Routes /register et /login gérées par auth.py
 
-@app.post("/register")
-def traiter_inscription(
-    nom: str = Form(...), prenom: str = Form(...), sexe: str = Form(...),
-    numero: str = Form(...), email: str = Form(...), password: str = Form(...),
-    profil: str = Form(...), db: Session = Depends(get_db)
-):
-    # Vérification si l'email existe déjà
-    user_exists = db.query(User).filter(User.email == email).first()
-    if user_exists:
-        return HTMLResponse("⚠️ Cet e-mail est déjà utilisé. <a href='/register'>Réessayer</a>", status_code=400)
-    
-    # Chiffrage basique du mot de passe
-    hashed_pwd = hashlib.sha256(password.encode()).hexdigest()
-    
-    nouveau_user = User(
-        nom=nom, prenom=prenom, sexe=sexe, numero=numero,
-        email=email, hashed_password=hashed_pwd, profil=profil
-    )
-    db.add(nouveau_user)
-    db.commit()
-    return RedirectResponse("/login", status_code=302)
+# Routes /login et /register gérées par auth.py
 
+# POST /login géré par auth.py (auth_router)
 
-# --- PAGE DE CONNEXION ---
-@app.get("/login", response_class=HTMLResponse)
-def page_connexion():
-    return f"""
-    <html>
-    <head>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        {COMMON_STYLE}
-        <style>
-            .login-card {{
-                max-width: 450px; margin: 100px auto;
-                background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1);
-                border-radius: 24px; padding: 40px; backdrop-filter: blur(20px);
-            }}
-            input {{
-                background: rgba(0,0,0,0.3) !important; border: 1px solid rgba(255,255,255,0.2) !important;
-                color: white !important; padding: 12px !important;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="login-card">
-            <h2 class="text-center mb-4">🔑 Connexion</h2>
-            <form action="/login" method="post">
-                <div class="mb-3">
-                    <label class="form-label">E-mail</label>
-                    <input type="email" name="email" class="form-control" required>
-                </div>
-                <div class="mb-4">
-                    <label class="form-label">Mot de passe</label>
-                    <input type="password" name="password" class="form-control" required>
-                </div>
-                <button type="submit" class="btn btn-neon w-100">SE CONNECTER</button>
-                <p class="text-center mt-3" style="font-size:14px;">Nouveau sur la plateforme ? <a href="/register" style="color:var(--neon-green);">Créer un compte</a></p>
-            </form>
-        </div>
-    </body>
-    </html>
-    """
+# GET /logout géré par auth.py (auth_router)
 
-#--------------TRAITEMENT CONNEXION-------------------
-
-@app.post("/login")
-def traiter_connexion(request: Request, email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
-    hashed_pwd = hashlib.sha256(password.encode()).hexdigest()
-    user = db.query(User).filter(User.email == email, User.hashed_password == hashed_pwd).first()
-    
-    if not user:
-        return HTMLResponse("⚠️ Identifiants incorrects. <a href='/login'>Réessayer</a>", status_code=401)
-    
-    # Enregistrement des informations dans la session
-    request.session["user_id"] = user.id
-    request.session["user_name"] = f"{user.prenom} {user.nom}"
-    request.session["user_role"] = user.profil  # CLIENT, FOURNISSEUR ou ENTREPRISE
-    
-    print(f"🔑 Connexion réussie pour {user.email} avec le rôle : {user.profil}") # Pour le débogage dans ta console
-    
-    # Redirection stricte et immédiate selon le profil
-    if user.profil == "ENTREPRISE":
-        return RedirectResponse(url="/", status_code=303)
-    elif user.profil == "CLIENT":
-        return RedirectResponse(url="/boutique", status_code=303)
-    elif user.profil == "FOURNISSEUR":
-        return RedirectResponse(url="/fournisseur/dashboard", status_code=303)
-        
-#-------------LOG OUT----------------------
-
-@app.get("/logout")
-def deconnexion(request: Request):
-    request.session.clear()
-    return RedirectResponse("/login")   
-    
- #---------------APRES CONNEXION-----------------
-
-ADMIN_CODE = "23U2696"
-
-@app.post("/login")
-def login(request: Request, code: str = Form(...)):
-
-    if code == ADMIN_CODE:
-        request.session["admin"] = True
-        return RedirectResponse("/welcome", status_code=302)
-    
-        return HTMLResponse("""
-        <html>
-        <body style="background:#0f172a;color:white;
-                     display:flex;justify-content:center;
-                     align-items:center;height:100vh;flex-direction:column;">
-
-            <div class="loader"></div>
-            <h2>Connexion réussie...</h2>
-
-            <script>
-                setTimeout(() => {
-                    window.location.href = "/welcome";
-                }, 1200);
-            </script>
-
-            <style>
-                .loader {
-                    width:40px;height:40px;
-                    border:4px solid #fff;
-                    border-top:4px solid transparent;
-                    border-radius:50%;
-                    animation:spin 1s linear infinite;
-                }
-                @keyframes spin { 100% { transform:rotate(360deg); } }
-            </style>
-
-        </body>
-        </html>
-        """)
-
-    return RedirectResponse("/login?error=1", status_code=302)
-    
 #------------HISTORIQUE----------------------
 
 @app.get("/admin/historique", response_class=HTMLResponse)
 def voir_historique(request: Request, db: Session = Depends(get_db)):
     # 1. Vérification de sécurité (Admin seulement)
-    if not request.session.get("admin"):
+    if not request.session.get("admin") and request.session.get("profil","") != "ENTREPRISE" and request.session.get("user_role","") != "ENTREPRISE":
         return RedirectResponse("/login")
     
     # 2. Récupération des ventes regroupées (Parent -> Vente)
