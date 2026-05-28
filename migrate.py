@@ -1,77 +1,84 @@
 """
-migrate.py — Migration de base de données
-Ajoute les colonnes/tables manquantes sans détruire les données existantes.
-À appeler UNE FOIS au démarrage depuis main.py : run_migrations(engine)
+migrate.py — Migration complète
+Ajoute toutes les colonnes manquantes à la table users et aux autres tables.
+Idempotent : sûr à relancer plusieurs fois.
 """
 
 from sqlalchemy import text, inspect
 
 
 def run_migrations(engine):
-    """
-    Vérifie l'état réel de la base et corrige les écarts avec les modèles.
-    Toutes les opérations sont idempotentes (sûres à relancer plusieurs fois).
-    """
     inspector = inspect(engine)
-    existing_tables = inspector.get_table_names()
+    existing  = inspector.get_table_names()
 
     with engine.connect() as conn:
 
-        # ──────────────────────────────────────────────────
-        # TABLE : ventes  — ajouter date_vente si manquant
-        # ──────────────────────────────────────────────────
-        if "ventes" in existing_tables:
-            cols_ventes = [c["name"] for c in inspector.get_columns("ventes")]
+        # ── TABLE users ────────────────────────────────────────
+        if "users" in existing:
+            cols = [c["name"] for c in inspector.get_columns("users")]
 
-            if "date_vente" not in cols_ventes:
-                print("🔧 Migration : ajout de ventes.date_vente")
-                conn.execute(text(
-                    "ALTER TABLE ventes ADD COLUMN date_vente DATETIME"
-                ))
-                # Remplir les lignes existantes avec la date du jour
-                conn.execute(text(
-                    "UPDATE ventes SET date_vente = datetime('now') WHERE date_vente IS NULL"
-                ))
-                conn.commit()
-                print("✅  ventes.date_vente ajouté.")
+            # Colonnes à ajouter : (nom, type SQL, valeur par défaut pour les lignes existantes)
+            user_cols = [
+                ("sexe",               "TEXT",     "''"),
+                ("telephone",          "TEXT",     "''"),
+                ("profil",             "TEXT",     "'ENTREPRISE'"),
+                ("type_entreprise",    "TEXT",     "NULL"),
+                ("date_creation",      "DATETIME", "datetime('now')"),
+                ("is_active",          "BOOLEAN",  "1"),
+                ("is_verified",        "BOOLEAN",  "1"),   # comptes existants = vérifiés
+                ("verification_token", "TEXT",     "NULL"),
+                ("token_expires_at",   "DATETIME", "NULL"),
+                ("password_hash",      "TEXT",     "''"),
+            ]
 
-        # ──────────────────────────────────────────────────
-        # TABLE : vente_items  — vérifications défensives
-        # ──────────────────────────────────────────────────
-        if "vente_items" in existing_tables:
-            cols_vi = [c["name"] for c in inspector.get_columns("vente_items")]
-            for col, col_type in [
-                ("rayon",         "TEXT"),
-                ("produit",       "TEXT"),
-                ("quantite",      "INTEGER"),
-                ("prix_unitaire", "INTEGER"),
-                ("total",         "INTEGER"),
-            ]:
-                if col not in cols_vi:
-                    print(f"🔧 Migration : ajout de vente_items.{col}")
+            for col, col_type, default in user_cols:
+                if col not in cols:
+                    print(f"🔧 Ajout de users.{col}")
                     conn.execute(text(
-                        f"ALTER TABLE vente_items ADD COLUMN {col} {col_type}"
+                        f"ALTER TABLE users ADD COLUMN {col} {col_type}"
                     ))
+                    if default != "NULL":
+                        conn.execute(text(
+                            f"UPDATE users SET {col} = {default} WHERE {col} IS NULL"
+                        ))
                     conn.commit()
 
-        # ──────────────────────────────────────────────────
-        # TABLE : stocks  — vérifications défensives
-        # ──────────────────────────────────────────────────
-        if "stocks" in existing_tables:
-            cols_s = [c["name"] for c in inspector.get_columns("stocks")]
-            if "quantite" not in cols_s:
-                print("🔧 Migration : ajout de stocks.quantite")
+            # Migrer hashed_password → password_hash si nécessaire
+            if "hashed_password" in cols and "password_hash" in [c["name"] for c in inspector.get_columns("users")]:
+                print("🔧 Migration hashed_password → password_hash")
                 conn.execute(text(
-                    "ALTER TABLE stocks ADD COLUMN quantite INTEGER DEFAULT 0"
+                    "UPDATE users SET password_hash = hashed_password "
+                    "WHERE password_hash = '' AND hashed_password IS NOT NULL"
                 ))
                 conn.commit()
 
-        # ──────────────────────────────────────────────────
-        # NOUVELLES TABLES  (créées par create_all, mais on
-        # s'assure qu'elles existent avant toute requête)
-        # Les tables users, commandes, commande_items,
-        # produits_fournisseur, commandes_b2b sont gérées
-        # automatiquement par Base.metadata.create_all().
-        # ──────────────────────────────────────────────────
+        # ── TABLE ventes ───────────────────────────────────────
+        if "ventes" in existing:
+            cols = [c["name"] for c in inspector.get_columns("ventes")]
+            if "date_vente" not in cols:
+                print("🔧 Ajout de ventes.date_vente")
+                conn.execute(text("ALTER TABLE ventes ADD COLUMN date_vente DATETIME"))
+                conn.execute(text("UPDATE ventes SET date_vente = datetime('now') WHERE date_vente IS NULL"))
+                conn.commit()
+
+        # ── TABLE vente_items ──────────────────────────────────
+        if "vente_items" in existing:
+            cols = [c["name"] for c in inspector.get_columns("vente_items")]
+            for col, typ in [
+                ("rayon","TEXT"),("produit","TEXT"),
+                ("quantite","INTEGER"),("prix_unitaire","INTEGER"),("total","INTEGER")
+            ]:
+                if col not in cols:
+                    print(f"🔧 Ajout de vente_items.{col}")
+                    conn.execute(text(f"ALTER TABLE vente_items ADD COLUMN {col} {typ}"))
+                    conn.commit()
+
+        # ── TABLE stocks ───────────────────────────────────────
+        if "stocks" in existing:
+            cols = [c["name"] for c in inspector.get_columns("stocks")]
+            if "quantite" not in cols:
+                print("🔧 Ajout de stocks.quantite")
+                conn.execute(text("ALTER TABLE stocks ADD COLUMN quantite INTEGER DEFAULT 0"))
+                conn.commit()
 
     print("🚀 Migrations terminées — base de données à jour.")
